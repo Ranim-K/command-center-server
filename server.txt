@@ -1,1 +1,1 @@
-ws://command-center-server.onrender.com
+wss://command-center-server.onrender.com
