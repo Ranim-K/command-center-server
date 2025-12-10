@@ -1,24 +1,46 @@
-const express = require('express');
-const WebSocket = require('ws');
+import express from "express";
+import { WebSocketServer } from "ws";
+import cors from "cors";
 
 const app = express();
-app.use(express.json());
+app.use(cors());
 
-const wss = new WebSocket.Server({ port: process.env.PORT || 8081 });
+// HTTP test route
+app.get("/", (req, res) => {
+  res.send("WebSocket server running");
+});
 
-let clients = [];
+// Create WebSocket server
+const wss = new WebSocketServer({ noServer: true });
+const clients = new Set();
 
-wss.on('connection', ws => {
-    clients.push(ws);
-    ws.on('close', () => {
-        clients = clients.filter(c => c !== ws);
+wss.on("connection", (ws) => {
+  clients.add(ws);
+
+  ws.on("message", (msg) => {
+    // Broadcast message to all connected clients
+    clients.forEach((client) => {
+      if (client.readyState === 1) {
+        client.send(msg.toString());
+      }
     });
+  });
+
+  ws.on("close", () => {
+    clients.delete(ws);
+  });
 });
 
-app.post('/command', (req, res) => {
-    const cmd = req.body.command;
-    clients.forEach(ws => ws.send(cmd));
-    res.json({ status: "sent", command: cmd });
+// Render will set the correct PORT automatically
+const PORT = process.env.PORT || 3000;
+
+const server = app.listen(PORT, () => {
+  console.log("Server running on port", PORT);
 });
 
-app.listen(process.env.PORT || 8080, () => console.log("Control server running"));
+// Upgrade HTTP → WebSocket
+server.on("upgrade", (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit("connection", ws, req);
+  });
+});
