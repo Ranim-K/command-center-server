@@ -1,5 +1,5 @@
-[
-  {"type": "run_app", "value": "notepad"},
-  {"type": "open_url", "value": "https://google.com"},
-  {"type": "system", "value": "calc"}
-]
+{
+  "targets": {
+    "Kami": []
+  }
+}
