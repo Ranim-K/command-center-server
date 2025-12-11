@@ -1,28 +1,24 @@
 import express from "express";
 import { WebSocketServer } from "ws";
-import cors from "cors";
 
 const app = express();
-app.use(cors());
 
-// HTTP test route
 app.get("/", (req, res) => {
-  res.send("WebSocket server running");
+  res.send("WebSocket Relay Server is running");
 });
 
 // Create WebSocket server
 const wss = new WebSocketServer({ noServer: true });
-const clients = new Set();
+
+let clients = new Set();
 
 wss.on("connection", (ws) => {
   clients.add(ws);
 
   ws.on("message", (msg) => {
-    // Broadcast message to all connected clients
+    // broadcast message to all clients
     clients.forEach((client) => {
-      if (client.readyState === 1) {
-        client.send(msg.toString());
-      }
+      if (client.readyState === 1) client.send(msg.toString());
     });
   });
 
@@ -31,14 +27,14 @@ wss.on("connection", (ws) => {
   });
 });
 
-// Render will set the correct PORT automatically
+// Render auto-assigns PORT
 const PORT = process.env.PORT || 3000;
 
-const server = app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
-});
+const server = app.listen(PORT, () =>
+  console.log("Server running on port " + PORT)
+);
 
-// Upgrade HTTP → WebSocket
+// Upgrade HTTP → WS
 server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws, req);
