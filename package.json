@@ -1,12 +1,10 @@
 {
-  "name": "command-center",
+  "name": "websocket-relay",
   "version": "1.0.0",
-  "main": "server.js",
   "type": "module",
   "dependencies": {
     "express": "^4.18.2",
-    "ws": "^8.15.0",
-    "cors": "^2.8.5"
+    "ws": "^8.15.0"
   },
   "scripts": {
     "start": "node server.js"
