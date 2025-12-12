@@ -11,144 +11,113 @@ const COMMAND_FILE = "./commands.json";
 
 let targets = { targets: {} };
 
-// Load existing commands.json
 try {
-  if (fs.existsSync(COMMAND_FILE)) {
-    targets = JSON.parse(fs.readFileSync(COMMAND_FILE));
-  }
+    if (fs.existsSync(COMMAND_FILE)) {
+        targets = JSON.parse(fs.readFileSync(COMMAND_FILE));
+    }
 } catch (err) {
-  console.error("Failed to read commands.json:", err);
+    console.error("Failed to read commands.json:", err);
 }
 
 function saveCommands() {
-  fs.writeFileSync(COMMAND_FILE, JSON.stringify(targets, null, 2));
+    fs.writeFileSync(COMMAND_FILE, JSON.stringify(targets, null, 2));
 }
 
-// WebSocket server
 const wss = new WebSocketServer({ noServer: true });
-const clients = new Map(); // targetName -> ws
-const controls = new Set(); // all connected controls
 
-wss.on("connection", (ws, req) => {
-  let targetName = null;
-  let role = null;
+const clients = new Map();   // client machines
+const controls = new Set();  // control interfaces
 
-  ws.on("message", (message) => {
-    try {
-      const data = JSON.parse(message);
+wss.on("connection", (ws) => {
+    let targetName = null;
+    let role = null;
 
-      // Registration
-      if (data.type === "register") {
-        role = data.role || "client";
+    ws.on("message", (msg) => {
+        let data = JSON.parse(msg);
 
-        if (role === "control") {
-          controls.add(ws);
-          console.log(`🟡 Control connected`);
-        } else {
-          targetName = data.name;
-          clients.set(targetName, ws);
-          console.log(`🟢 Client connected: ${targetName}`);
+        // Registration
+        if (data.type === "register") {
+            role = data.role || "client";
 
-          // Send pending commands
-          if (targets.targets[targetName]) {
-            targets.targets[targetName].forEach(cmd => {
-              if (cmd.status === "pending") ws.send(JSON.stringify(cmd));
+            if (role === "control") {
+                controls.add(ws);
+                console.log("🟡 Control connected");
+                return;
+            }
+
+            if (role === "client") {
+                targetName = data.name;
+                clients.set(targetName, ws);
+                console.log(`🟢 Client connected: ${targetName}`);
+
+                // Send pending commands
+                if (targets.targets[targetName]) {
+                    targets.targets[targetName].forEach(cmd => {
+                        if (cmd.status === "pending") ws.send(JSON.stringify(cmd));
+                    });
+                }
+                return;
+            }
+        }
+
+        // Client sends back results
+        if (role === "client" && data.type === "response") {
+            // update command status
+            const arr = targets.targets[targetName] || [];
+            const cmd = arr.find(c => c.id === data.id);
+            if (cmd) cmd.status = "done";
+            saveCommands();
+
+            // Forward to all controls
+            controls.forEach(c => {
+                if (c.readyState === 1) {
+                    c.send(JSON.stringify({
+                        type: "client_response",
+                        client: targetName,
+                        payload: data
+                    }));
+                }
             });
-          }
-        }
-        return;
-      }
-
-      // Client response
-      if (role === "client" && data.type === "response" && targetName) {
-        // Update commands.json
-        if (targets.targets[targetName]) {
-          const cmd = targets.targets[targetName].find(c => c.id === data.id);
-          if (cmd) cmd.status = data.status || "executed";
-          saveCommands();
         }
 
-        // Forward to all controls
-        controls.forEach(ctrl => {
-          if (ctrl.readyState === 1) {
-            ctrl.send(JSON.stringify({
-              type: "client_response",
-              client: targetName,
-              payload: data
-            }));
-          }
-        });
-        return;
-      }
+        // Control sends file-explorer commands
+        if (role === "control" && data.type === "command") {
+            const target = data.target;
+            const command = data.command;
+            const args = data.args || "";
 
-      // Optionally: control can send commands via WS
-      if (role === "control" && data.type === "command") {
-        const target = data.target;
-        const type_ = data.command;
-        const value = data.args || "";
+            if (!targets.targets[target]) targets.targets[target] = [];
 
-        if (!target || !type_) return;
+            const cmd = {
+                id: uuidv4(),
+                type: command,
+                value: args,
+                status: "pending"
+            };
 
-        if (!targets.targets[target]) targets.targets[target] = [];
+            targets.targets[target].push(cmd);
+            saveCommands();
 
-        const cmd = {
-          id: uuidv4(),
-          type: type_,
-          value: value,
-          status: "pending",
-          timestamp: Date.now()
-        };
-
-        targets.targets[target].push(cmd);
-        saveCommands();
-
-        const wsTarget = clients.get(target);
-        if (wsTarget && wsTarget.readyState === 1) {
-          wsTarget.send(JSON.stringify(cmd));
+            // Send to client
+            const cli = clients.get(target);
+            if (cli && cli.readyState === 1) {
+                cli.send(JSON.stringify(cmd));
+            }
         }
-        return;
-      }
+    });
 
-    } catch (err) {
-      console.error("Invalid message:", message);
-    }
-  });
-
-  ws.on("close", () => {
-    if (role === "control") {
-      controls.delete(ws);
-      console.log("❌ Control disconnected");
-    } else if (targetName) {
-      clients.delete(targetName);
-      console.log(`❌ Client disconnected: ${targetName}`);
-    }
-  });
+    ws.on("close", () => {
+        if (role === "control") controls.delete(ws);
+        if (role === "client" && targetName) clients.delete(targetName);
+    });
 });
 
-// HTTP routes for control (optional) yes
-app.post("/send", (req, res) => {
-  const { target, type, value } = req.body;
-  if (!target || !type) return res.status(400).send({ error: "Missing fields" });
-
-  if (!targets.targets[target]) targets.targets[target] = [];
-
-  const cmd = { id: uuidv4(), type, value: value || "", status: "pending", timestamp: Date.now() };
-  targets.targets[target].push(cmd);
-  saveCommands();
-
-  const ws = clients.get(target);
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(cmd));
-
-  res.send({ success: true, id: cmd.id });
+const server = app.listen(PORT, () => {
+    console.log("File Explorer Server running on port", PORT);
 });
 
-app.get("/status/:target", (req, res) => {
-  res.send({ online: clients.has(req.params.target) });
-});
-
-const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 server.on("upgrade", (req, socket, head) => {
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit("connection", ws, req);
-  });
+    wss.handleUpgrade(req, socket, head, ws => {
+        wss.emit("connection", ws);
+    });
 });
