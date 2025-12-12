@@ -125,7 +125,7 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-// HTTP routes for control (optional)
+// HTTP routes for control (optional) yes
 app.post("/send", (req, res) => {
   const { target, type, value } = req.body;
   if (!target || !type) return res.status(400).send({ error: "Missing fields" });
