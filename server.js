@@ -2,15 +2,12 @@ import express from "express";
 import { WebSocketServer } from "ws";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
-import path from "path";
 
 const app = express();
-app.use(express.json({ limit: "50mb" })); // increase limit for file uploads
+app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const COMMAND_FILE = "./commands.json";
-const STORAGE = "./storage";
-fs.mkdirSync(STORAGE, { recursive: true });
 
 let targets = { targets: {} };
 
@@ -58,14 +55,6 @@ wss.on("connection", (ws, req) => {
         const cmdId = data.id;
         const status = data.status;
         const cmd = targets.targets[targetName].find(c => c.id === cmdId);
-
-        // Handle file delivery
-        if (status === "executed" && cmd.type === "push_file" && cmd.value.local_path) {
-          // Move uploaded file to storage
-          const dest = path.join(STORAGE, path.basename(cmd.value.local_path));
-          fs.writeFileSync(dest, Buffer.from(cmd.value.content_b64, "base64"));
-        }
-
         if (cmd) cmd.status = status;
         saveCommands();
         console.log(`Target ${targetName} executed command ${cmdId}: ${status}`);
